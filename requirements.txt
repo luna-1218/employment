@@ -1,9 +1,7 @@
 streamlit
-numpy
 pandas
+numpy
+requests
+plotly
 matplotlib
-xarray
-netCDF4
-cartopy
-shapely
-pyproj
+seaborn
