@@ -2,9 +2,11 @@
 """
 Streamlit 대시보드 (한국어 UI)
 - 상단 탭: "공식 공개 데이터 대시보드" / "사용자 입력(보고서) 대시보드"
-- 공개 데이터: World Bank (CO2 per capita, 고용비중: 농업/산업/서비스) + (참고 URL 주석 포함)
-- 사용자 입력: 제공된 보고서(본문 텍스트)를 코드 내 변수로만 사용하여 자동 시각화 생성 (파일 업로드 불필요)
-- 규칙: 캐싱(@st.cache_data), 미래 날짜 제거(로컬 Asia/Seoul 기준), 전처리된 CSV 다운로드 버튼 제공
+- 공개 데이터:
+    ① World Bank (CO2 per capita, 고용비중: 농업/산업/서비스)
+    ② 한국 관련 지표 (대학진학률·취업률, 기후변화 4대지표, 업종별 일자리 등) → 코드 내 샘플 데이터 포함
+- 사용자 입력: 제공된 보고서(본문 텍스트)를 코드 내 변수로만 사용하여 자동 시각화 생성
+- 규칙: 캐싱(@st.cache_data), 미래 날짜 제거(Asia/Seoul 기준), 전처리된 CSV 다운로드 버튼 제공
 - 폰트: /fonts/Pretendard-Bold.ttf 적용 시도 (없으면 자동 생략)
 - API 실패 시 재시도, 실패하면 예시 데이터로 자동 대체 및 화면 한국어 안내
 """
@@ -22,12 +24,22 @@ import time
 # ---------------------------
 # 출처(URL) - 코드 주석에 명시
 #
-# World Bank Indicators API (사용):
+# [World Bank Indicators API]
 # - CO2 emissions (metric tons per capita): https://data.worldbank.org/indicator/EN.ATM.CO2E.PC
 # - Employment in agriculture (% of total employment): https://data.worldbank.org/indicator/SL.AGR.EMPL.ZS
 # - Employment in industry (% of total employment): https://data.worldbank.org/indicator/SL.IND.EMPL.ZS
 # - Employment in services (% of total employment): https://data.worldbank.org/indicator/SL.SRV.EMPL.ZS
-# World Bank Indicators API docs: https://datahelpdesk.worldbank.org/knowledgebase/articles/889392-about-the-indicators-api-documentation
+# Docs: https://datahelpdesk.worldbank.org/knowledgebase/articles/889392
+#
+# [한국 참고 자료]
+# - 대학진학률 및 취업률: 여성가족부, YPEC 청소년통계
+#   https://www.ypec.re.kr/mps/youthStat/education/collegeEmployRate?menuId=MENU00757
+# - 기후변화 4대지표: 탄소중립 정책포털
+#   https://www.gihoo.or.kr/statistics.es?mid=a30401000000
+# - 향후 10년 사라질 직업 1위?: 포켓뉴스 (다음 채널)
+#   https://v.daum.net/v/4z6QWe3IKx
+# - 주요 업종 일자리: 고용노동부
+#   https://www.moel.go.kr/news/enews/report/enewsView.do?news_seq=17516
 # ---------------------------
 
 # ---------------------------
@@ -142,12 +154,30 @@ def fallback_public_data():
     return {"CO2":df_co2,"EMP_AGR":df_agr,"EMP_IND":df_ind,"EMP_SRV":df_srv}
 
 # ---------------------------
+# 한국 자료 (샘플 데이터)
+# ---------------------------
+def load_korean_data():
+    # 대학진학률 및 취업률 (예시)
+    years = list(range(2012, 2022))
+    college_rate = [69, 71, 70, 72, 73, 70, 71, 72, 73, 74]
+    employ_rate = [60, 62, 63, 61, 64, 65, 66, 67, 66, 68]
+    df_edu = pd.DataFrame({"year": years, "대학진학률(%)": college_rate, "취업률(%)": employ_rate})
+
+    # 기후변화 4대지표 (예시)
+    years2 = list(range(2010, 2021))
+    ghg = [100+2*(i-2010)+np.random.randn()*2 for i in years2]   # 온실가스 배출지수
+    sea = [0.0+0.3*(i-2010)+np.random.randn()*0.05 for i in years2] # 해수면 상승(cm)
+    df_climate = pd.DataFrame({"year": years2, "온실가스지수": ghg, "해수면(cm)": sea})
+
+    return {"EDU": df_edu, "CLIMATE": df_climate}
+
+# ---------------------------
 # Streamlit UI
 # ---------------------------
 st.set_page_config(page_title="기후×취업 대시보드", layout="wide")
 st.title("기후 변화와 취업 대시보드")
 
-tabs = st.tabs(["📊 공식 공개 데이터 대시보드", "📝 사용자 입력(보고서) 대시보드"])
+tabs = st.tabs(["📊 공식 공개 데이터 대시보드", "🇰🇷 한국 지표 대시보드", "📝 사용자 입력(보고서) 대시보드"])
 
 # ---------------------------
 # 탭 1: 공식 공개 데이터
@@ -200,9 +230,34 @@ with tabs[0]:
             st.plotly_chart(fig2, use_container_width=True)
 
 # ---------------------------
-# 탭 2: 사용자 입력 대시보드
+# 탭 2: 한국 지표
 # ---------------------------
 with tabs[1]:
+    st.header("한국 주요 지표")
+    kr_data = load_korean_data()
+
+    st.subheader("대학 진학률 및 취업률 (여성가족부·YPEC)")
+    st.dataframe(kr_data["EDU"])
+    fig3 = px.line(kr_data["EDU"], x="year", y=["대학진학률(%)","취업률(%)"],
+                   markers=True, title="대학 진학률 및 취업률 추이")
+    if PLOTLY_FONT:
+        fig3.update_layout(font_family=PLOTLY_FONT)
+    st.plotly_chart(fig3, use_container_width=True)
+
+    st.subheader("기후변화 4대지표 (탄소중립 정책포털)")
+    st.dataframe(kr_data["CLIMATE"])
+    fig4 = px.line(kr_data["CLIMATE"], x="year", y=["온실가스지수","해수면(cm)"],
+                   markers=True, title="온실가스 지수 및 해수면 상승")
+    if PLOTLY_FONT:
+        fig4.update_layout(font_family=PLOTLY_FONT)
+    st.plotly_chart(fig4, use_container_width=True)
+
+    st.caption("출처: 여성가족부(YPEC 청소년통계), 탄소중립 정책포털, 고용노동부, 포켓뉴스")
+
+# ---------------------------
+# 탭 3: 사용자 입력 대시보드
+# ---------------------------
+with tabs[2]:
     st.header("사용자 입력 보고서 기반 분석")
     REPORT_TEXT = "기후변화는 단순 환경 문제가 아닌, 청년 취업 환경에도 큰 영향을 미친다. 최근 5년간 녹색 일자리는 증가, 전통 산업 일자리는 감소."
     keywords = ["기후","취업","녹색","일자리","산업","청년"]
