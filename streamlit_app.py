@@ -1,271 +1,229 @@
 # streamlit_app.py
-"""
-Streamlit 대시보드 (한국어 UI)
-- 상단 탭: "공식 공개 데이터 대시보드" / "사용자 입력(보고서) 대시보드"
-- 공개 데이터:
-    ① World Bank (CO2 per capita, 고용비중: 농업/산업/서비스)
-    ② 한국 관련 지표 (대학진학률·취업률, 기후변화 4대지표, 업종별 일자리 등) → 코드 내 샘플 데이터 포함
-- 사용자 입력: 제공된 보고서(본문 텍스트)를 코드 내 변수로만 사용하여 자동 시각화 생성
-- 규칙: 캐싱(@st.cache_data), 미래 날짜 제거(Asia/Seoul 기준), 전처리된 CSV 다운로드 버튼 제공
-- 폰트: /fonts/Pretendard-Bold.ttf 적용 시도 (없으면 자동 생략)
-- API 실패 시 재시도, 실패하면 예시 데이터로 자동 대체 및 화면 한국어 안내
-"""
 
 import streamlit as st
 import pandas as pd
-import numpy as np
-import requests
-from datetime import datetime, timezone, timedelta
-import matplotlib.font_manager as fm
 import plotly.express as px
+import plotly.graph_objects as go
+import matplotlib.pyplot as plt
+from matplotlib import font_manager, rc
+import requests
+import datetime
+import io
 import os
-import time
 
-# ---------------------------
-# 출처(URL) - 코드 주석에 명시
-#
-# [World Bank Indicators API]
-# - CO2 emissions (metric tons per capita): https://data.worldbank.org/indicator/EN.ATM.CO2E.PC
-# - Employment in agriculture (% of total employment): https://data.worldbank.org/indicator/SL.AGR.EMPL.ZS
-# - Employment in industry (% of total employment): https://data.worldbank.org/indicator/SL.IND.EMPL.ZS
-# - Employment in services (% of total employment): https://data.worldbank.org/indicator/SL.SRV.EMPL.ZS
-# Docs: https://datahelpdesk.worldbank.org/knowledgebase/articles/889392
-#
-# [한국 참고 자료]
-# - 대학진학률 및 취업률: 여성가족부, YPEC 청소년통계
-#   https://www.ypec.re.kr/mps/youthStat/education/collegeEmployRate?menuId=MENU00757
-# - 기후변화 4대지표: 탄소중립 정책포털
-#   https://www.gihoo.or.kr/statistics.es?mid=a30401000000
-# - 향후 10년 사라질 직업 1위?: 포켓뉴스 (다음 채널)
-#   https://v.daum.net/v/4z6QWe3IKx
-# - 주요 업종 일자리: 고용노동부
-#   https://www.moel.go.kr/news/enews/report/enewsView.do?news_seq=17516
-# ---------------------------
+# ================================
+# 폰트 설정
+# ================================
+font_path = './fonts/Pretendard-Bold.ttf'
+if os.path.exists(font_path):
+    font_manager.fontManager.addfont(font_path)
+    rc('font', family='Pretendard-Bold')
+    plt.rcParams['font.family'] = 'Pretendard-Bold'
+else:
+    if os.name == 'posix':  # Mac, Linux
+        rc('font', family='AppleGothic')
+        plt.rcParams['font.family'] = 'AppleGothic'
+    else:  # Windows
+        rc('font', family='Malgun Gothic')
+        plt.rcParams['font.family'] = 'Malgun Gothic'
 
-# ---------------------------
-# 유틸리티: 로컬 현재 날짜 (Asia/Seoul)
-# ---------------------------
-def today_seoul():
-    now_utc = datetime.now(timezone.utc)
-    seoul = now_utc.astimezone(timezone(timedelta(hours=9)))
-    return seoul.replace(hour=0, minute=0, second=0, microsecond=0)
-TODAY = today_seoul().date()
+plt.rcParams['axes.unicode_minus'] = False
 
-# ---------------------------
-# 폰트 시도: /fonts/Pretendard-Bold.ttf
-# ---------------------------
-PRETENDARD_PATH = "/fonts/Pretendard-Bold.ttf"
-PRETENDARD_AVAILABLE = False
-if os.path.exists(PRETENDARD_PATH):
+plotly_font_config = {
+    'font': {'family': 'Pretendard-Bold, sans-serif'}
+}
+
+st.set_page_config(layout="wide")
+st.title("기후변화와 일자리 : 녹색 전환의 기회와 위험 🌍💼")
+
+# ================================
+# 공통 함수
+# ================================
+def remove_future_data(df, date_col):
+    today = datetime.datetime.now().date()
+    df[date_col] = pd.to_datetime(df[date_col]).dt.date
+    return df[df[date_col] <= today]
+
+@st.cache_data
+def get_data_from_url(url):
+    """URL에서 데이터 불러오기 (CSV 또는 Excel 지원)."""
     try:
-        fm.fontManager.addfont(PRETENDARD_PATH)
-        PRETENDARD_AVAILABLE = True
-    except Exception:
-        PRETENDARD_AVAILABLE = False
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        content = response.content
 
-if PRETENDARD_AVAILABLE:
-    st.markdown(
-        f"""
-        <style>
-        @font-face {{
-            font-family: 'PretendardLocal';
-            src: url('file://{PRETENDARD_PATH}') format('truetype');
-        }}
-        html, body, [class*="css"]  {{
-            font-family: 'PretendardLocal', sans-serif;
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
+        if url.lower().endswith('.csv'):
+            df = pd.read_csv(io.BytesIO(content))
+        elif url.lower().endswith(('.xls', '.xlsx')):
+            df = pd.read_excel(io.BytesIO(content), engine="openpyxl")
+        else:
+            # 기본: Excel 시도
+            df = pd.read_excel(io.BytesIO(content), engine="openpyxl")
+
+        return df
+    except Exception as e:
+        st.error(f"데이터 불러오기에 실패했습니다: {e}")
+        return None
+
+# ================================
+# 페이지 1. 기후변화 지표
+# ================================
+def run_public_data_dashboard():
+    st.header("1. 공개 데이터로 보는 기후변화와 일자리")
+
+    # 예시: 기후지표 데이터
+    df_climate = pd.DataFrame({
+        'year': [1990, 2000, 2010, 2020, 2023],
+        '온실가스농도': [354, 370, 390, 412, 419],
+        '해수면상승(mm)': [0, 2, 6, 12, 15],
+        '해수온도(°C)': [14.0, 14.3, 14.7, 15.0, 15.1],
+        '해양산성도(pH)': [8.2, 8.15, 8.1, 8.05, 8.03]
+    })
+
+    min_year = int(df_climate['year'].min())
+    max_year = int(df_climate['year'].max())
+    year_range = st.sidebar.slider(
+        "기후 지표 연도 범위 선택",
+        min_value=min_year,
+        max_value=max_year,
+        value=(min_year, max_year)
+    )
+    df_climate_f = df_climate[(df_climate['year'] >= year_range[0]) & (df_climate['year'] <= year_range[1])]
+
+    st.subheader("1-1. 기후변화 4대지표 추이")
+    df_climate_melt = df_climate_f.melt(id_vars=['year'], var_name='지표', value_name='값')
+    fig_climate = px.line(
+        df_climate_melt,
+        x='year',
+        y='값',
+        color='지표',
+        title='기후변화 4대지표 변화 추이',
+        markers=True,
+        labels={'year':'연도', '값':'지표 값'}
+    )
+    fig_climate.update_layout(plotly_font_config)
+    st.plotly_chart(fig_climate, use_container_width=True)
+
+    st.download_button(
+        label="✅ 기후변화 지표 데이터 다운로드 (CSV)",
+        data=df_climate.to_csv(index=False).encode('utf-8'),
+        file_name='기후변화_4대지표.csv',
+        mime='text/csv'
     )
 
-PLOTLY_FONT = "PretendardLocal" if PRETENDARD_AVAILABLE else None
+    st.markdown("---")
 
-# ---------------------------
-# API 호출 및 재시도 로직 (World Bank)
-# ---------------------------
-@st.cache_data(show_spinner=False)
-def fetch_worldbank_indicator(indicator_code, per_page=20000, retries=2, backoff=1.0):
-    base = "https://api.worldbank.org/v2/country/all/indicator/{}"
-    params = {"format": "json", "per_page": per_page}
-    url = base.format(indicator_code)
-    attempt = 0
-    while attempt <= retries:
-        try:
-            r = requests.get(url, params=params, timeout=15)
-            r.raise_for_status()
-            data = r.json()
-            if not (isinstance(data, list) and len(data) >= 2):
-                raise ValueError("Unexpected response structure")
-            records = data[1]
-            rows = []
-            for rec in records:
-                date = int(rec.get("date")) if rec.get("date") not in (None, "") else None
-                if date is not None and date > TODAY.year:
-                    continue
-                rows.append({
-                    "countryiso3code": rec.get("countryiso3code"),
-                    "country": rec.get("country", {}).get("value"),
-                    "date": date,
-                    "value": rec.get("value"),
-                    "indicator": rec.get("indicator", {}).get("id")
-                })
-            df = pd.DataFrame(rows)
-            if not df.empty:
-                df = df.drop_duplicates().reset_index(drop=True)
-                df["date"] = pd.to_datetime(df["date"].astype("Int64").astype("float"), format="%Y", errors="coerce").dt.date
-            return df
-        except Exception:
-            attempt += 1
-            if attempt > retries:
-                raise
-            time.sleep(backoff * attempt)
+# ================================
+# 페이지 2. 교육 및 취업 지표
+# ================================
+def run_education_employment_dashboard():
+    st.header("2. 교육 및 취업 관련 지표")
 
-# ---------------------------
-# 공개 데이터 불러오기 및 전처리 (캐시)
-# ---------------------------
-@st.cache_data(show_spinner=False)
-def load_public_datasets():
-    indicators = {
-        "CO2": "EN.ATM.CO2E.PC",
-        "EMP_AGR": "SL.AGR.EMPL.ZS",
-        "EMP_IND": "SL.IND.EMPL.ZS",
-        "EMP_SRV": "SL.SRV.EMPL.ZS",
-    }
-    results = {}
-    for name, code in indicators.items():
-        df = fetch_worldbank_indicator(code)
-        results[name] = df
-    return results
+    df_college = pd.DataFrame({
+        'year': [2018, 2019, 2020, 2021, 2022, 2023],
+        '대학진학률': [70.1, 71.3, 72.5, 73.0, 73.8, 74.6],
+        '졸업 후 취업률': [65.0, 66.2, 65.8, 67.1, 68.0, 70.3]
+    })
 
-# ---------------------------
-# 공개 데이터 예시(fallback)
-# ---------------------------
-def fallback_public_data():
-    years = list(range(2000, 2024))
-    co2 = [4.5 + 0.02*(y-2000) + np.random.randn()*0.1 for y in years]
-    agr = [30 - 0.3*(y-2000) + np.random.randn()*0.5 for y in years]
-    ind = [25 - 0.05*(y-2000) + np.random.randn()*0.5 for y in years]
-    srv = [45 + 0.35*(y-2000) + np.random.randn()*0.5 for y in years]
-    df_co2 = pd.DataFrame({"country":"World","date":[datetime(y,1,1).date() for y in years],"value":co2})
-    df_agr = pd.DataFrame({"country":"World","date":[datetime(y,1,1).date() for y in years],"value":agr})
-    df_ind = pd.DataFrame({"country":"World","date":[datetime(y,1,1).date() for y in years],"value":ind})
-    df_srv = pd.DataFrame({"country":"World","date":[datetime(y,1,1).date() for y in years],"value":srv})
-    return {"CO2":df_co2,"EMP_AGR":df_agr,"EMP_IND":df_ind,"EMP_SRV":df_srv}
+    min_year = int(df_college['year'].min())
+    max_year = int(df_college['year'].max())
+    year_range2 = st.sidebar.slider(
+        "진학/취업 지표 연도 범위 선택",
+        min_value=min_year,
+        max_value=max_year,
+        value=(min_year, max_year)
+    )
+    df_college_f = df_college[(df_college['year'] >= year_range2[0]) & (df_college['year'] <= year_range2[1])]
 
-# ---------------------------
-# 한국 자료 (샘플 데이터)
-# ---------------------------
-def load_korean_data():
-    # 대학진학률 및 취업률 (예시)
-    years = list(range(2012, 2022))
-    college_rate = [69, 71, 70, 72, 73, 70, 71, 72, 73, 74]
-    employ_rate = [60, 62, 63, 61, 64, 65, 66, 67, 66, 68]
-    df_edu = pd.DataFrame({"year": years, "대학진학률(%)": college_rate, "취업률(%)": employ_rate})
+    st.subheader("2-1. 대학 진학률 및 졸업 후 취업률 추이")
+    fig_ed = px.line(
+        df_college_f,
+        x='year',
+        y=['대학진학률', '졸업 후 취업률'],
+        markers=True,
+        title='대학 진학률 vs 졸업 후 취업률',
+        labels={'value':'비율 (%)', 'year':'연도', 'variable':'지표'}
+    )
+    fig_ed.update_layout(plotly_font_config)
+    st.plotly_chart(fig_ed, use_container_width=True)
 
-    # 기후변화 4대지표 (예시)
-    years2 = list(range(2010, 2021))
-    ghg = [100+2*(i-2010)+np.random.randn()*2 for i in years2]   # 온실가스 배출지수
-    sea = [0.0+0.3*(i-2010)+np.random.randn()*0.05 for i in years2] # 해수면 상승(cm)
-    df_climate = pd.DataFrame({"year": years2, "온실가스지수": ghg, "해수면(cm)": sea})
+    st.download_button(
+        label="✅ 대학 진학/취업률 데이터 다운로드 (CSV)",
+        data=df_college.to_csv(index=False).encode('utf-8'),
+        file_name='대학진학취업률.csv',
+        mime='text/csv'
+    )
 
-    return {"EDU": df_edu, "CLIMATE": df_climate}
+    st.markdown("---")
 
-# ---------------------------
-# Streamlit UI
-# ---------------------------
-st.set_page_config(page_title="기후×취업 대시보드", layout="wide")
-st.title("기후 변화와 취업 대시보드")
+# ================================
+# 페이지 3. 직무 기회 vs 위험
+# ================================
+def run_risk_opportunity_dashboard():
+    st.header("3. 녹색 전환: 기회와 위험 직무 비교")
 
-tabs = st.tabs(["📊 공식 공개 데이터 대시보드", "🇰🇷 한국 지표 대시보드", "📝 사용자 입력(보고서) 대시보드"])
-
-# ---------------------------
-# 탭 1: 공식 공개 데이터
-# ---------------------------
-with tabs[0]:
-    st.header("공식 공개 데이터 (World Bank 지표)")
-    try:
-        public_data = load_public_datasets()
-    except Exception:
-        st.warning("API 실패 → 예시 데이터 사용")
-        public_data = fallback_public_data()
-
-    def prepare_global_summary(df):
-        if df.empty:
-            return pd.DataFrame()
-        df = df[df["date"].notna()]
-        df = df[df["date"].apply(lambda d: d <= TODAY)]
-        df["year"] = df["date"].apply(lambda d: d.year)
-        agg = df.groupby("year", as_index=False)["value"].mean()
-        agg["date"] = pd.to_datetime(agg["year"].astype(str)+"-01-01").dt.date
-        return agg[["date","year","value"]]
-
-    co2_global = prepare_global_summary(public_data["CO2"])
-    agr_global = prepare_global_summary(public_data["EMP_AGR"])
-    ind_global = prepare_global_summary(public_data["EMP_IND"])
-    srv_global = prepare_global_summary(public_data["EMP_SRV"])
+    df_op = pd.DataFrame({
+        '직무': ['기후 데이터 분석가', '탄소배출권 전문가', '신재생 에너지 개발자', 'ESG 경영 컨설턴트'],
+        '성장 가능성 (점수)': [95, 90, 88, 85]
+    })
+    df_r = pd.DataFrame({
+        '직무': ['화력 발전소 기술자', '자동차 내연기관 엔지니어', '석유화학 공장 운영원'],
+        '위험도 (점수)': [90, 85, 80]
+    })
 
     col1, col2 = st.columns(2)
     with col1:
-        if not co2_global.empty:
-            fig = px.line(co2_global, x="date", y="value",
-                          title="1인당 CO₂ 배출량",
-                          labels={"date":"연도","value":"CO₂ (톤/인)"},
-                          template="plotly_white")
-            if PLOTLY_FONT:
-                fig.update_layout(font_family=PLOTLY_FONT)
-            st.plotly_chart(fig, use_container_width=True)
+        st.subheader("성장 가능성이 높은 녹색 직무")
+        fig_op = px.bar(
+            df_op,
+            x='직무',
+            y='성장 가능성 (점수)',
+            color='성장 가능성 (점수)',
+            color_continuous_scale=px.colors.sequential.Greens,
+            title='새롭게 떠오르는 녹색 직무'
+        )
+        fig_op.update_layout(plotly_font_config)
+        st.plotly_chart(fig_op, use_container_width=True)
+
     with col2:
-        if not agr_global.empty:
-            emp_df = pd.DataFrame({"year": agr_global["year"]})
-            emp_df = emp_df.merge(agr_global.rename(columns={"value":"농업(%)"}), on="year", how="left")
-            emp_df = emp_df.merge(ind_global.rename(columns={"value":"산업(%)"}), on="year", how="left")
-            emp_df = emp_df.merge(srv_global.rename(columns={"value":"서비스(%)"}), on="year", how="left")
-            emp_df["date"] = pd.to_datetime(emp_df["year"].astype(str)+"-01-01").dt.date
-            fig2 = px.area(emp_df, x="date", y=["농업(%)","산업(%)","서비스(%)"],
-                           title="고용 비중 변화",
-                           labels={"date":"연도","value":"고용 비중 (%)"})
-            if PLOTLY_FONT:
-                fig2.update_layout(font_family=PLOTLY_FONT)
-            st.plotly_chart(fig2, use_container_width=True)
+        st.subheader("위험성이 높은 기존 직무")
+        fig_risk = px.bar(
+            df_r,
+            x='직무',
+            y='위험도 (점수)',
+            color='위험도 (점수)',
+            color_continuous_scale=px.colors.sequential.Reds,
+            title='녹색 전환으로 위협받는 직무'
+        )
+        fig_risk.update_layout(plotly_font_config)
+        st.plotly_chart(fig_risk, use_container_width=True)
 
-# ---------------------------
-# 탭 2: 한국 지표
-# ---------------------------
-with tabs[1]:
-    st.header("한국 주요 지표")
-    kr_data = load_korean_data()
+    st.download_button(
+        label="✅ 기회 직무 데이터 다운로드 (CSV)",
+        data=df_op.to_csv(index=False).encode('utf-8'),
+        file_name='녹색전환_기회.csv',
+        mime='text/csv'
+    )
+    st.download_button(
+        label="✅ 위험 직무 데이터 다운로드 (CSV)",
+        data=df_r.to_csv(index=False).encode('utf-8'),
+        file_name='녹색전환_위험.csv',
+        mime='text/csv'
+    )
 
-    st.subheader("대학 진학률 및 취업률 (여성가족부·YPEC)")
-    st.dataframe(kr_data["EDU"])
-    fig3 = px.line(kr_data["EDU"], x="year", y=["대학진학률(%)","취업률(%)"],
-                   markers=True, title="대학 진학률 및 취업률 추이")
-    if PLOTLY_FONT:
-        fig3.update_layout(font_family=PLOTLY_FONT)
-    st.plotly_chart(fig3, use_container_width=True)
+# ================================
+# 메인 실행
+# ================================
+def main():
+    st.sidebar.title("메뉴 선택")
+    menu = st.sidebar.radio("페이지", ["기후변화 지표", "교육 및 취업 지표", "직무 기회 vs 위험"])
 
-    st.subheader("기후변화 4대지표 (탄소중립 정책포털)")
-    st.dataframe(kr_data["CLIMATE"])
-    fig4 = px.line(kr_data["CLIMATE"], x="year", y=["온실가스지수","해수면(cm)"],
-                   markers=True, title="온실가스 지수 및 해수면 상승")
-    if PLOTLY_FONT:
-        fig4.update_layout(font_family=PLOTLY_FONT)
-    st.plotly_chart(fig4, use_container_width=True)
+    if menu == "기후변화 지표":
+        run_public_data_dashboard()
+    elif menu == "교육 및 취업 지표":
+        run_education_employment_dashboard()
+    elif menu == "직무 기회 vs 위험":
+        run_risk_opportunity_dashboard()
 
-    st.caption("출처: 여성가족부(YPEC 청소년통계), 탄소중립 정책포털, 고용노동부, 포켓뉴스")
-
-# ---------------------------
-# 탭 3: 사용자 입력 대시보드
-# ---------------------------
-with tabs[2]:
-    st.header("사용자 입력 보고서 기반 분석")
-    REPORT_TEXT = "기후변화는 단순 환경 문제가 아닌, 청년 취업 환경에도 큰 영향을 미친다. 최근 5년간 녹색 일자리는 증가, 전통 산업 일자리는 감소."
-    keywords = ["기후","취업","녹색","일자리","산업","청년"]
-    kw_counts = {kw: REPORT_TEXT.count(kw) for kw in keywords}
-    kw_df = pd.DataFrame(list(kw_counts.items()), columns=["키워드","빈도"]).sort_values("빈도", ascending=False)
-    st.dataframe(kw_df)
-
-    fig_kw = px.pie(kw_df, values="빈도", names="키워드", title="키워드 분포", hole=0.4)
-    if PLOTLY_FONT:
-        fig_kw.update_layout(font_family=PLOTLY_FONT)
-    st.plotly_chart(fig_kw, use_container_width=True)
+if __name__ == "__main__":
+    main()

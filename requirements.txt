@@ -1,7 +1,7 @@
+# requirements.txt
 streamlit
 pandas
-numpy
-requests
 plotly
 matplotlib
-seaborn
+openpyxl
+requests
